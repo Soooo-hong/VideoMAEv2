@@ -4,38 +4,38 @@ set -x
 export MASTER_PORT=$((12000 + $RANDOM % 20000))
 export OMP_NUM_THREADS=1
 
-OUTPUT_DIR='YOUR_PATH/work_dir/vit_h_hybrid_pt_1200e_k600_ft'
-DATA_PATH='YOUR_PATH/data/k600'
-MODEL_PATH='YOUR_PATH/model_zoo/vit_h_hybrid_pt_1200e.pth'
+OUTPUT_DIR='/home/shk00315/intelligent_robot/VideoMAEv2/outputs' #모델 저장할 경로 
+DATA_PATH='/mnt/datasets/soohong/k600/skeleton/train' # 데이터셋 있는 장소 + 여기에 val.csv, train.csv 둘 다 넣으면 될 듯 
+MODEL_PATH='/home/shk00315/intelligent_robot/VideoMAEv2/vit_g_hybrid_pt_1200e.pth' #finetuning model이나  학습 후 모델 경로로 지정하면될 듯 
 
-JOB_NAME=$1
-PARTITION=${PARTITION:-"video"}
-# 8 for 1 node, 16 for 2 node, etc.
-GPUS=${GPUS:-1}
-GPUS_PER_NODE=${GPUS_PER_NODE:-1}
-CPUS_PER_TASK=${CPUS_PER_TASK:-10}
-SRUN_ARGS=${SRUN_ARGS:-""}
+# JOB_NAME=$1
+# PARTITION=${PARTITION:-"video"}
+# # 8 for 1 node, 16 for 2 node, etc.
+# GPUS=${GPUS:-1}
+# GPUS_PER_NODE=${GPUS_PER_NODE:-1}
+# CPUS_PER_TASK=${CPUS_PER_TASK:-10}
+# SRUN_ARGS=${SRUN_ARGS:-""}
 PY_ARGS=${@:2}
 
 # batch_size can be adjusted according to the graphics card
-srun -p $PARTITION \
-        --job-name=${JOB_NAME} \
-        --gres=gpu:${GPUS_PER_NODE} \
-        --ntasks=${GPUS} \
-        --ntasks-per-node=${GPUS_PER_NODE} \
-        --cpus-per-task=${CPUS_PER_TASK} \
-        --kill-on-bad-exit=1 \
-        --quotatype=auto \
-        ${SRUN_ARGS} \
-        python run_class_finetuning.py \
+# srun -p $PARTITION \
+#         --job-name=${JOB_NAME} \
+#         --gres=gpu:${GPUS_PER_NODE} \
+#         --ntasks=${GPUS} \
+#         --ntasks-per-node=${GPUS_PER_NODE} \
+#         --cpus-per-task=${CPUS_PER_TASK} \
+#         --kill-on-bad-exit=1 \
+#         --quotatype=auto \
+#         ${SRUN_ARGS} \
+python infer_for_test.py \
         --model vit_huge_patch16_224 \
-        --data_set Kinetics-600 \
-        --nb_classes 600 \
+        --data_set Kinetics-10 \
+        --nb_classes 10 \
         --data_path ${DATA_PATH} \
         --finetune ${MODEL_PATH} \
         --log_dir ${OUTPUT_DIR} \
         --output_dir ${OUTPUT_DIR} \
-        --batch_size 4 \
+        --batch_size 1 \
         --input_size 224 \
         --short_side_size 224 \
         --save_ckpt_freq 10 \

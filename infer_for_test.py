@@ -1,15 +1,8 @@
-# --------------------------------------------------------
-# Based on BEiT, timm, DINO and DeiT code bases
-# https://github.com/microsoft/unilm/tree/master/beit
-# https://github.com/rwightman/pytorch-image-models/tree/master/timm
-# https://github.com/facebookresearch/deit
-# https://github.com/facebookresearch/dino
-# --------------------------------------------------------'
-
 import argparse
 import datetime
 import json
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 import random
 import time
 from collections import OrderedDict
@@ -43,7 +36,6 @@ from optim_factory import (
 from utils import NativeScalerWithGradNormCount as NativeScaler
 from utils import multiple_samples_collate
 
-
 def get_args():
     parser = argparse.ArgumentParser(
         'VideoMAE fine-tuning and evaluation script for action classification',
@@ -56,7 +48,7 @@ def get_args():
     # Model parameters
     parser.add_argument(
         '--model',
-        default='vit_base_patch16_224',
+        default='vit_huge_patch16_224',
         type=str,
         metavar='MODEL',
         help='Name of model to train')
@@ -280,7 +272,7 @@ def get_args():
 
     # * Finetuning params
     parser.add_argument(
-        '--finetune', default='', help='finetune from checkpoint')
+        '--finetune', default='/home/shk00315/intelligent_robot/VideoMAEv2/vit_g_hybrid_pt_1200e.pth', help='finetune from checkpoint')
     parser.add_argument('--model_key', default='model|module', type=str)
     parser.add_argument('--model_prefix', default='', type=str)
     parser.add_argument('--init_scale', default=0.001, type=float)
@@ -292,19 +284,19 @@ def get_args():
     # Dataset parameters
     parser.add_argument(
         '--data_path',
-        default='/your/data/path/',
+        default='/mnt/datasets/soohong/k600/skeleton/train',
         type=str,
         help='dataset path')
     parser.add_argument(
         '--data_root', default='', type=str, help='dataset path root')
     parser.add_argument(
         '--eval_data_path',
-        default=None,
+        default='/mnt/datasets/soohong/k600/skeleton/val',
         type=str,
         help='dataset path for evaluation')
     parser.add_argument(
         '--nb_classes',
-        default=400,
+        default=10,
         type=int,
         help='number of the classification types')
     parser.add_argument(
@@ -315,10 +307,10 @@ def get_args():
     parser.add_argument('--sparse_sample', default=False, action='store_true')
     parser.add_argument(
         '--data_set',
-        default='Kinetics-400',
+        default='Kinetics-10',
         choices=[
             'Kinetics-400', 'Kinetics-600', 'Kinetics-700', 'SSV2', 'UCF101',
-            'HMDB51', 'Diving48', 'Kinetics-710', 'MIT','Test'
+            'HMDB51', 'Diving48', 'Kinetics-710', 'MIT','Kinetics-10'
         ],
         type=str,
         help='dataset')
@@ -335,7 +327,7 @@ def get_args():
 
     parser.add_argument(
         '--output_dir',
-        default='',
+        default='test_result',
         help='path where to save, empty for no saving')
     parser.add_argument(
         '--log_dir', default=None, help='path where to tensorboard log')
@@ -392,6 +384,11 @@ def get_args():
     parser.add_argument(
         '--enable_deepspeed', action='store_true', default=False)
 
+    # infer용으로만 사용할 것인지 
+    
+    parser.add_argument(
+        '--fine_tune_result_path',default='intelligent_robot/VideoMAEv2/outputs',type=str
+    ) #sh파일의 output_dir경로로 지정되어있음 
     known_args, _ = parser.parse_known_args()
 
     if known_args.enable_deepspeed:
@@ -403,17 +400,79 @@ def get_args():
     return parser.parse_args(), ds_init
 
 
-def main(args, ds_init):
-    utils.init_distributed_mode(args)
 
+def main(args,ds_init) : 
+#args, ds_init = get_args()
+    utils.init_distributed_mode(args)
     if ds_init is not None:
         utils.create_ds_config(args)
 
-    print(args)
+    checkpoint = torch.load(args.finetune, map_location='cpu')
+    print("Load ckpt from %s" % args.finetune)
 
-    device = torch.device(args.device)
+    checkpoint_model = None
+    for model_key in args.model_key.split('|'):
+        if model_key in checkpoint:
+            checkpoint_model = checkpoint[model_key]
+            print("Load state_dict by model_key = %s" % model_key)
+            break
+    if checkpoint_model is None:
+        checkpoint_model = checkpoint
+    for old_key in list(checkpoint_model.keys()):
+        if old_key.startswith('_orig_mod.'):
+            new_key = old_key[10:]
+            checkpoint_model[new_key] = checkpoint_model.pop(old_key)
 
-    # fix the seed for reproducibility
+    model = create_model(
+            args.model,
+            img_size=args.input_size,
+            pretrained=False,
+            num_classes=args.nb_classes,
+            all_frames=args.num_frames * args.num_segments,
+            tubelet_size=args.tubelet_size,
+            drop_rate=args.drop,
+            drop_path_rate=args.drop_path,
+            attn_drop_rate=args.attn_drop_rate,
+            head_drop_rate=args.head_drop_rate,
+            drop_block_rate=None,
+            use_mean_pooling=args.use_mean_pooling,
+            init_scale=args.init_scale,
+            with_cp=args.with_checkpoint,
+        )
+
+    model.reset_classifier(10)
+
+    patch_size = model.patch_embed.patch_size
+
+    args.window_size = (args.num_frames // args.tubelet_size,
+                        args.input_size // patch_size[0],
+                        args.input_size // patch_size[1])
+
+    args.patch_size = patch_size
+
+    state_dict = model.state_dict()
+    for k in ['head.weight', 'head.bias']:
+        if k in checkpoint_model and checkpoint_model[
+                k].shape != state_dict[k].shape:
+            if checkpoint_model[k].shape[
+                    0] == 710 and args.data_set.startswith('Kinetics'):
+                print(f'Convert K710 head to {args.data_set} head')
+                if args.data_set == 'Kinetics-400':
+                    label_map_path = 'misc/label_710to400.json'
+                elif args.data_set == 'Kinetics-600':
+                    label_map_path = 'misc/label_710to600.json'
+                elif args.data_set == 'Kinetics-700':
+                    label_map_path = 'misc/label_710to700.json'
+                elif args.data_set == 'Kinnetics-10' :
+                    label_map_path = 'misc/label_710to10.json'
+                label_map = json.load(open(label_map_path))
+                checkpoint_model[k] = checkpoint_model[k][label_map]
+            else:
+                print(f"Removing key {k} from pretrained checkpoint")
+                del checkpoint_model[k]
+
+
+
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -453,9 +512,10 @@ def main(args, ds_init):
     else:
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
+
     if global_rank == 0 and args.log_dir is not None:
-        os.makedirs(args.log_dir, exist_ok=True)
-        log_writer = utils.TensorboardLogger(log_dir=args.log_dir)
+            os.makedirs(args.log_dir, exist_ok=True)
+            log_writer = utils.TensorboardLogger(log_dir=args.log_dir)
     else:
         log_writer = None
 
@@ -465,14 +525,14 @@ def main(args, ds_init):
         collate_func = None
 
     data_loader_train = torch.utils.data.DataLoader(
-        dataset_train,
-        sampler=sampler_train,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-        collate_fn=collate_func,
-        persistent_workers=True)
+            dataset_train,
+            sampler=sampler_train,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=True,
+            collate_fn=collate_func,
+            persistent_workers=True)
 
     if dataset_val is not None:
         data_loader_val = torch.utils.data.DataLoader(
@@ -497,7 +557,7 @@ def main(args, ds_init):
             persistent_workers=True)
     else:
         data_loader_test = None
-
+            
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
     if mixup_active:
@@ -511,171 +571,105 @@ def main(args, ds_init):
             mode=args.mixup_mode,
             label_smoothing=args.smoothing,
             num_classes=args.nb_classes)
-
-    model = create_model(
-        args.model,
-        img_size=args.input_size,
-        pretrained=False,
-        num_classes=args.nb_classes,
-        all_frames=args.num_frames * args.num_segments,
-        tubelet_size=args.tubelet_size,
-        drop_rate=args.drop,
-        drop_path_rate=args.drop_path,
-        attn_drop_rate=args.attn_drop_rate,
-        head_drop_rate=args.head_drop_rate,
-        drop_block_rate=None,
-        use_mean_pooling=args.use_mean_pooling,
-        init_scale=args.init_scale,
-        with_cp=args.with_checkpoint,
-    )
-
-    patch_size = model.patch_embed.patch_size
-    print("Patch size = %s" % str(patch_size))
-
-    args.window_size = (args.num_frames // args.tubelet_size,
-                        args.input_size // patch_size[0],
-                        args.input_size // patch_size[1])
-
-    args.patch_size = patch_size
-
-    if args.finetune:
-        if args.finetune.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.finetune, map_location='cpu', check_hash=True)
+        
+    all_keys = list(checkpoint_model.keys())
+    new_dict = OrderedDict()
+    for key in all_keys:
+        if key.startswith('backbone.'):
+            new_dict[key[9:]] = checkpoint_model[key]
+        elif key.startswith('encoder.'):
+            new_dict[key[8:]] = checkpoint_model[key]
         else:
-            checkpoint = torch.load(args.finetune, map_location='cpu')
+            new_dict[key] = checkpoint_model[key]
+    checkpoint_model = new_dict
 
-        print("Load ckpt from %s" % args.finetune)
-        checkpoint_model = None
-        for model_key in args.model_key.split('|'):
-            if model_key in checkpoint:
-                checkpoint_model = checkpoint[model_key]
-                print("Load state_dict by model_key = %s" % model_key)
-                break
-        if checkpoint_model is None:
-            checkpoint_model = checkpoint
-        for old_key in list(checkpoint_model.keys()):
-            if old_key.startswith('_orig_mod.'):
-                new_key = old_key[10:]
-                checkpoint_model[new_key] = checkpoint_model.pop(old_key)
+    # interpolate position embedding
+    if 'pos_embed' in checkpoint_model:
+        pos_embed_checkpoint = checkpoint_model['pos_embed']
+        embedding_size = pos_embed_checkpoint.shape[-1]  # channel dim
+        num_patches = model.patch_embed.num_patches  #
+        num_extra_tokens = model.pos_embed.shape[-2] - num_patches  # 0/1
 
-        state_dict = model.state_dict()
-        for k in ['head.weight', 'head.bias']:
-            if k in checkpoint_model and checkpoint_model[
-                    k].shape != state_dict[k].shape:
-                if checkpoint_model[k].shape[
-                        0] == 710 and args.data_set.startswith('Kinetics'):
-                    print(f'Convert K710 head to {args.data_set} head')
-                    if args.data_set == 'Kinetics-400':
-                        label_map_path = 'misc/label_710to400.json'
-                    elif args.data_set == 'Kinetics-600':
-                        label_map_path = 'misc/label_710to600.json'
-                    elif args.data_set == 'Kinetics-700':
-                        label_map_path = 'misc/label_710to700.json'
-
-                    label_map = json.load(open(label_map_path))
-                    checkpoint_model[k] = checkpoint_model[k][label_map]
-                else:
-                    print(f"Removing key {k} from pretrained checkpoint")
-                    del checkpoint_model[k]
-
-        all_keys = list(checkpoint_model.keys())
-        new_dict = OrderedDict()
-        for key in all_keys:
-            if key.startswith('backbone.'):
-                new_dict[key[9:]] = checkpoint_model[key]
-            elif key.startswith('encoder.'):
-                new_dict[key[8:]] = checkpoint_model[key]
-            else:
-                new_dict[key] = checkpoint_model[key]
-        checkpoint_model = new_dict
-
-        # interpolate position embedding
-        if 'pos_embed' in checkpoint_model:
-            pos_embed_checkpoint = checkpoint_model['pos_embed']
-            embedding_size = pos_embed_checkpoint.shape[-1]  # channel dim
-            num_patches = model.patch_embed.num_patches  #
-            num_extra_tokens = model.pos_embed.shape[-2] - num_patches  # 0/1
-
-            # height (== width) for the checkpoint position embedding
-            orig_size = int(
-                ((pos_embed_checkpoint.shape[-2] - num_extra_tokens) //
-                 (args.num_frames // model.patch_embed.tubelet_size))**0.5)
-            # height (== width) for the new position embedding
-            new_size = int(
-                (num_patches //
-                 (args.num_frames // model.patch_embed.tubelet_size))**0.5)
-            # class_token and dist_token are kept unchanged
-            if orig_size != new_size:
-                print("Position interpolate from %dx%d to %dx%d" %
-                      (orig_size, orig_size, new_size, new_size))
-                extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
-                # only the position tokens are interpolated
-                pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
-                # B, L, C -> BT, H, W, C -> BT, C, H, W
-                pos_tokens = pos_tokens.reshape(
-                    -1, args.num_frames // model.patch_embed.tubelet_size,
-                    orig_size, orig_size, embedding_size)
-                pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size,
-                                                embedding_size).permute(
-                                                    0, 3, 1, 2)
-                pos_tokens = torch.nn.functional.interpolate(
-                    pos_tokens,
-                    size=(new_size, new_size),
-                    mode='bicubic',
-                    align_corners=False)
-                # BT, C, H, W -> BT, H, W, C ->  B, T, H, W, C
-                pos_tokens = pos_tokens.permute(0, 2, 3, 1).reshape(
-                    -1, args.num_frames // model.patch_embed.tubelet_size,
-                    new_size, new_size, embedding_size)
-                pos_tokens = pos_tokens.flatten(1, 3)  # B, L, C
-                new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
-                checkpoint_model['pos_embed'] = new_pos_embed
-        elif args.input_size != 224:
-            pos_tokens = model.pos_embed
-            org_num_frames = 16
-            T = org_num_frames // args.tubelet_size
-            P = int((pos_tokens.shape[1] // T)**0.5)
-            C = pos_tokens.shape[2]
-            new_P = args.input_size // patch_size[0]
+        # height (== width) for the checkpoint position embedding
+        orig_size = int(
+            ((pos_embed_checkpoint.shape[-2] - num_extra_tokens) //
+                (args.num_frames // model.patch_embed.tubelet_size))**0.5)
+        # height (== width) for the new position embedding
+        new_size = int(
+            (num_patches //
+                (args.num_frames // model.patch_embed.tubelet_size))**0.5)
+        # class_token and dist_token are kept unchanged
+        if orig_size != new_size:
+            print("Position interpolate from %dx%d to %dx%d" %
+                    (orig_size, orig_size, new_size, new_size))
+            extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
+            # only the position tokens are interpolated
+            pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
             # B, L, C -> BT, H, W, C -> BT, C, H, W
-            pos_tokens = pos_tokens.reshape(-1, T, P, P, C)
-            pos_tokens = pos_tokens.reshape(-1, P, P, C).permute(0, 3, 1, 2)
+            pos_tokens = pos_tokens.reshape(
+                -1, args.num_frames // model.patch_embed.tubelet_size,
+                orig_size, orig_size, embedding_size)
+            pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size,
+                                            embedding_size).permute(
+                                                0, 3, 1, 2)
             pos_tokens = torch.nn.functional.interpolate(
                 pos_tokens,
-                size=(new_P, new_P),
+                size=(new_size, new_size),
                 mode='bicubic',
                 align_corners=False)
             # BT, C, H, W -> BT, H, W, C ->  B, T, H, W, C
-            pos_tokens = pos_tokens.permute(0, 2, 3,
-                                            1).reshape(-1, T, new_P, new_P, C)
+            pos_tokens = pos_tokens.permute(0, 2, 3, 1).reshape(
+                -1, args.num_frames // model.patch_embed.tubelet_size,
+                new_size, new_size, embedding_size)
             pos_tokens = pos_tokens.flatten(1, 3)  # B, L, C
-            model.pos_embed = pos_tokens  # update
-        if args.num_frames != 16:
-            org_num_frames = 16
-            T = org_num_frames // args.tubelet_size
-            pos_tokens = model.pos_embed
-            new_T = args.num_frames // args.tubelet_size
-            P = int((pos_tokens.shape[1] // T)**0.5)
-            C = pos_tokens.shape[2]
-            pos_tokens = pos_tokens.reshape(-1, T, P, P, C)
-            pos_tokens = pos_tokens.permute(0, 2, 3, 4,
-                                            1).reshape(-1, C, T)  # BHW,C,T
-            pos_tokens = torch.nn.functional.interpolate(
-                pos_tokens, size=new_T, mode='linear')
-            pos_tokens = pos_tokens.reshape(1, P, P, C,
-                                            new_T).permute(0, 4, 1, 2, 3)
-            pos_tokens = pos_tokens.flatten(1, 3)
-            model.pos_embed = pos_tokens  # update
+            new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
+            checkpoint_model['pos_embed'] = new_pos_embed
+    elif args.input_size != 224:
+        pos_tokens = model.pos_embed
+        org_num_frames = 16
+        T = org_num_frames // args.tubelet_size
+        P = int((pos_tokens.shape[1] // T)**0.5)
+        C = pos_tokens.shape[2]
+        new_P = args.input_size // patch_size[0]
+        # B, L, C -> BT, H, W, C -> BT, C, H, W
+        pos_tokens = pos_tokens.reshape(-1, T, P, P, C)
+        pos_tokens = pos_tokens.reshape(-1, P, P, C).permute(0, 3, 1, 2)
+        pos_tokens = torch.nn.functional.interpolate(
+            pos_tokens,
+            size=(new_P, new_P),
+            mode='bicubic',
+            align_corners=False)
+        # BT, C, H, W -> BT, H, W, C ->  B, T, H, W, C
+        pos_tokens = pos_tokens.permute(0, 2, 3,
+                                        1).reshape(-1, T, new_P, new_P, C)
+        pos_tokens = pos_tokens.flatten(1, 3)  # B, L, C
+        model.pos_embed = pos_tokens  # update
+    if args.num_frames != 16:
+        org_num_frames = 16
+        T = org_num_frames // args.tubelet_size
+        pos_tokens = model.pos_embed
+        new_T = args.num_frames // args.tubelet_size
+        P = int((pos_tokens.shape[1] // T)**0.5)
+        C = pos_tokens.shape[2]
+        pos_tokens = pos_tokens.reshape(-1, T, P, P, C)
+        pos_tokens = pos_tokens.permute(0, 2, 3, 4,
+                                        1).reshape(-1, C, T)  # BHW,C,T
+        pos_tokens = torch.nn.functional.interpolate(
+            pos_tokens, size=new_T, mode='linear')
+        pos_tokens = pos_tokens.reshape(1, P, P, C,
+                                        new_T).permute(0, 4, 1, 2, 3)
+        pos_tokens = pos_tokens.flatten(1, 3)
+        model.pos_embed = pos_tokens  # update
+    utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
 
-        utils.load_state_dict(
-            model, checkpoint_model, prefix=args.model_prefix)
-
+    device = torch.device(args.device)
     model.to(device)
 
+
+    # 
     model_ema = None
     if args.model_ema:
-        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
+            # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
         model_ema = ModelEma(
             model,
             decay=args.model_ema_decay,
@@ -685,7 +679,7 @@ def main(args, ds_init):
 
     model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters()
-                       if p.requires_grad)
+                        if p.requires_grad)
 
     print("Model = %s" % str(model_without_ddp))
     print('number of params:', n_parameters)
@@ -693,22 +687,21 @@ def main(args, ds_init):
     total_batch_size = args.batch_size * args.update_freq * num_tasks
     num_training_steps_per_epoch = len(dataset_train) // total_batch_size
     args.lr = args.lr * total_batch_size / 256
-    #########scale the lr#############
+
+    ####### learning rate 조절 ############
     args.min_lr = args.min_lr * total_batch_size / 256
     args.warmup_lr = args.warmup_lr * total_batch_size / 256
-    #########scale the lr#############
     print("LR = %.8f" % args.lr)
     print("Batch size = %d" % total_batch_size)
     print("Update frequent = %d" % args.update_freq)
     print("Number of training examples = %d" % len(dataset_train))
-    print("Number of training training per epoch = %d" %
-          num_training_steps_per_epoch)
+    print("Number of training training per epoch = %d" %num_training_steps_per_epoch)
 
     num_layers = model_without_ddp.get_num_layers()
     if args.layer_decay < 1.0:
         assigner = LayerDecayValueAssigner(
             list(args.layer_decay**(num_layers + 1 - i)
-                 for i in range(num_layers + 2)))
+                    for i in range(num_layers + 2)))
     else:
         assigner = None
 
@@ -732,7 +725,7 @@ def main(args, ds_init):
         )
 
         print("model.gradient_accumulation_steps() = %d" %
-              model.gradient_accumulation_steps())
+                model.gradient_accumulation_steps())
         assert model.gradient_accumulation_steps() == args.update_freq
     else:
         if args.distributed:
@@ -750,6 +743,7 @@ def main(args, ds_init):
             if assigner is not None else None)
         loss_scaler = NativeScaler()
 
+
     print("Use step level LR scheduler!")
     lr_schedule_values = utils.cosine_scheduler(
         args.lr,
@@ -766,7 +760,7 @@ def main(args, ds_init):
                                                 args.epochs,
                                                 num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" %
-          (max(wd_schedule_values), min(wd_schedule_values)))
+            (max(wd_schedule_values), min(wd_schedule_values)))
 
     if mixup_fn is not None:
         # smoothing is handled with mixup label transform
@@ -785,13 +779,14 @@ def main(args, ds_init):
         optimizer=optimizer,
         loss_scaler=loss_scaler,
         model_ema=model_ema)
+
     if args.validation:
         test_stats = validation_one_epoch(data_loader_val, model, device)
         print(
             f"{len(dataset_val)} val images: Top-1 {test_stats['acc1']:.2f}%, Top-5 {test_stats['acc5']:.2f}%, loss {test_stats['loss']:.4f}"
         )
         exit(0)
-
+        
     if args.eval:
         preds_file = os.path.join(args.output_dir, str(global_rank) + '.txt')
         test_stats = final_test(data_loader_test, model, device, preds_file)
@@ -810,10 +805,22 @@ def main(args, ds_init):
                         encoding="utf-8") as f:
                     f.write(json.dumps(log_stats) + "\n")
         exit(0)
-
+    ### 1280-> 10으로 학습 ()
+    
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # layer_33_no_decay 및 layer_33_decay에 해당하는 파라미터만 학습 가능하게 설정
+    no_decay_params = ["module.fc_norm.weight", "module.fc_norm.bias", "module.head.bias"]
+    decay_params = ["module.head.weight"]
+
+    for name, param in model.named_parameters():
+        if name in no_decay_params or name in decay_params:
+            param.requires_grad = True
+    
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
@@ -896,7 +903,7 @@ def main(args, ds_init):
                     mode="a",
                     encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
-
+    
     preds_file = os.path.join(args.output_dir, str(global_rank) + '.txt')
     test_stats = final_test(data_loader_test, model, device, preds_file)
     torch.distributed.barrier()
@@ -919,8 +926,7 @@ def main(args, ds_init):
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 
-
-if __name__ == '__main__':
+if __name__ == '__main__' : 
     opts, ds_init = get_args()
     if opts.output_dir:
         Path(opts.output_dir).mkdir(parents=True, exist_ok=True)
