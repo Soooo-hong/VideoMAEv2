@@ -48,7 +48,7 @@ def get_args():
     # Model parameters
     parser.add_argument(
         '--model',
-        default='vit_huge_patch16_224',
+        default='vit_giant_patch14_224',
         type=str,
         metavar='MODEL',
         help='Name of model to train')
@@ -664,7 +664,7 @@ def main(args,ds_init) :
 
     device = torch.device(args.device)
     model.to(device)
-
+    
 
     # 
     model_ema = None
