@@ -1,0 +1,10 @@
+bowling
+baseball
+basketball
+boxing
+golf
+hammer_throw
+snatch
+soccer
+swimming
+tennis
