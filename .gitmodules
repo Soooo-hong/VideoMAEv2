@@ -1,0 +1,3 @@
+[submodule "VideoMAEv2"]
+	path = VideoMAEv2
+	url = https://github.com/Soooo-hong/VideoMAEv2.git

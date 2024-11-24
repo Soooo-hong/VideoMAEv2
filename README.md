@@ -1,3 +1,10 @@
+<<<<<<< HEAD
+# Guessing_pose
+1. train 돌릴 때는 scripts/finetune/vit_h_k600_ft.sh 내에 경로들 수정 후 돌리기
+   ``` bash
+   bash script/finetune/vit_h_k600_ft.sh
+   
+=======
 # [CVPR 2023] Official Implementation of VideoMAE V2
 
 ![flowchart](misc/VideoMAEv2_flowchart.png)
@@ -75,3 +82,4 @@ If you find this repository useful, please use the following BibTeX entry for ci
       primaryClass={cs.CV}
 }
 ```
+>>>>>>> master
